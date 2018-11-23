@@ -6,6 +6,8 @@ classdef MI_choiceDual < handle
         imgFolder='C:\Code\2018_10_MI_choice\Images';
         structsFolder='C:\Code\2018_10_MI_choice\TempImgStructs';
         questionsFile='questions.mat';
+        elMap;
+        questionOrder;
         openParams;
         openCOMport;
         questions;
@@ -25,6 +27,8 @@ classdef MI_choiceDual < handle
         trialInfo;
         errChance;
         trialsPerQuestion=10;
+        lastErrP_BACC;
+        lastMI_BACC;
     end
     properties (Dependent)
         currTime;
@@ -41,6 +45,10 @@ classdef MI_choiceDual < handle
         shortTimer;
         listener;
         instanceName;
+        currQuestion=0;
+        isPausing=0;
+        lastErrP_method;
+        lastMI_method;
     end
     methods
         %% Constructor
@@ -49,15 +57,15 @@ classdef MI_choiceDual < handle
             % buffer window length) cannot be changed directly from here,
             % so please do make sure that they're matching with the current
             % settings of relevant Simulink model.
-            obj.isDebugging=1;
+            obj.isDebugging=0;
             
             % Set length of initial countdown, in seconds
             if obj.isDebugging
                 obj.CDlength=2;
-                obj.maxNtrials=20;
+                obj.maxNtrials=60;
             else
                 obj.CDlength=15;
-                obj.maxNtrials=300;
+                obj.maxNtrials=400;
             end
                         
             % Define timing parameters
@@ -66,11 +74,13 @@ classdef MI_choiceDual < handle
                 obj.timingParams.questionLength=1;
                 obj.timingParams.imgLength=1;
                 obj.timingParams.feedbackLength=.5;
+                obj.timingParams.waitTime=0;
             else
-                obj.timingParams.blankLength=2;
+                obj.timingParams.blankLength=1;
                 obj.timingParams.questionLength=2;
-                obj.timingParams.imgLength=3;
-                obj.timingParams.feedbackLength=2;
+                obj.timingParams.imgLength=3.5;
+                obj.timingParams.feedbackLength=1;
+                obj.timingParams.waitTime=0.5; % Cursor will not move for this duration after image is presented. Does not affect total time of image presentation!
             end
             obj.timingParams.updateTime=1/10;
             
@@ -80,6 +90,12 @@ classdef MI_choiceDual < handle
             else
                 obj.errChance=0.3;
             end
+            
+            % Load electrode map from file
+            obj.elMap=loadMap;
+            
+            % Set number of questions between pauses
+            obj.timingParams.questionsBetweenPauses=8;
             
             % Set colors for different objects
             obj.colorScheme.bg=[.7,.7,.7];
@@ -94,6 +110,8 @@ classdef MI_choiceDual < handle
             
             % Set cursor size
             obj.figureParams.cursorRadius=100;
+            
+            obj.figureParams.h=[];
                        
             % Define vibration intensities for different events
             obj.vibrationParams.MItrain=.7;
@@ -138,6 +156,10 @@ classdef MI_choiceDual < handle
                     end
                 end
             end
+            
+            % I need to tell Simulink that the model was launched from
+            % script instead of by itself
+            assignin('base','isProperExp',1)
             
             % Determine name to be used to save file upon closing
             obj.fileName=datestr(now,30);
@@ -203,14 +225,32 @@ classdef MI_choiceDual < handle
             % If expected number of trials has been reached, close exp
             if length(obj.outputLog.trialLog)>=obj.maxNtrials
                 obj.closeExp;
+                return;
+            end
+                        
+            % Randomly select questions order, if this is first pass
+            if isempty(obj.questionOrder)
+                obj.questionOrder=randperm(length(obj.questions));
             end
             
             % Determine new couple of images to be displayed
             obj.trialInfo.nextCoupleInd=mod(length(obj.timeTriggeredEvents(3).triggersLog),obj.trialsPerQuestion)+1;
-            obj.trialInfo.nextCorrectInd=obj.questions.CorrectListIdx(obj.trialInfo.nextCoupleInd);
-            obj.trialInfo.nextErrorInd=obj.questions.WrongListIdx(obj.trialInfo.nextCoupleInd);
+            if obj.trialInfo.nextCoupleInd==1
+                obj.currQuestion=obj.currQuestion+1;
+                if obj.currQuestion>length(obj.questions)
+                    obj.closeExp;
+                    return;
+                end
+                % Scramble list of answers for current question
+                newOrder=randperm(length(obj.questions(obj.questionOrder(obj.currQuestion)).CorrectListIdx));
+                obj.questions(obj.questionOrder(obj.currQuestion)).CorrectListIdx=obj.questions(obj.questionOrder(obj.currQuestion)).CorrectListIdx(newOrder);
+                obj.questions(obj.questionOrder(obj.currQuestion)).WrongListIdx=obj.questions(obj.questionOrder(obj.currQuestion)).WrongListIdx(newOrder);
+            end
+            obj.trialInfo.nextCorrectInd=obj.questions(obj.questionOrder(obj.currQuestion)).CorrectListIdx(obj.trialInfo.nextCoupleInd);
+            obj.trialInfo.nextErrorInd=obj.questions(obj.questionOrder(obj.currQuestion)).WrongListIdx(obj.trialInfo.nextCoupleInd);
             obj.trialInfo.correctPos=ceil(rand*2);
             obj.trialInfo.isFeedbackCorrect=rand>obj.errChance;
+            obj.trialInfo.currQuestion=obj.questionOrder(obj.currQuestion);
             
             % Log trial data generated above
             obj.outputLog.trialLog=cat(1,obj.outputLog.trialLog,obj.trialInfo);
@@ -229,13 +269,8 @@ classdef MI_choiceDual < handle
             obj.timeTriggeredEvents(2).triggersLog=[obj.timeTriggeredEvents(2).triggersLog,obj.currTime];
             
             % Write question on screen
-            obj.figureParams.textHandle=text(obj.screenRes(1)*.5,obj.screenRes(2)*.5,obj.questions.EnglishQuestion,'FontSize',64,'HorizontalAlignment','Center','VerticalAlignment','Middle');
+            obj.figureParams.textHandle=text(obj.screenRes(1)*.5,obj.screenRes(2)*.5,obj.questions(obj.questionOrder(obj.currQuestion)).EnglishQuestion,'FontSize',64,'HorizontalAlignment','Center','VerticalAlignment','Middle');
             hold on;
-            
-            % Scramble list of answers for current question
-            newOrder=randperm(length(obj.questions.CorrectListIdx));
-            obj.questions.CorrectListIdx=obj.questions.CorrectListIdx(newOrder);
-            obj.questions.WrongListIdx=obj.questions.WrongListIdx(newOrder);
             
             % Clear fixation cross, if present
             if isfield(obj.figureParams,'crossV')&&~isempty(obj.figureParams.crossV)
@@ -243,6 +278,10 @@ classdef MI_choiceDual < handle
                 delete(obj.figureParams.crossH);
             end
             
+            % Pause, if needed
+            if mod(obj.currQuestion,obj.timingParams.questionsBetweenPauses)==0
+                waitfor(warndlg('This is a pause, press OK to resume experiment.','Pause','modal'));
+            end
             % Set triggers
             obj.timeTriggeredEvents(2).nextTrigger=Inf;
             obj.timeTriggeredEvents(3).nextTrigger=obj.currTime+obj.timingParams.questionLength;
@@ -259,8 +298,8 @@ classdef MI_choiceDual < handle
             end 
             
             % Display images on screen
-            img{obj.trialInfo.correctPos}=obj.imgStack(obj.trialInfo.nextCorrectInd).Img;
-            img{3-obj.trialInfo.correctPos}=obj.imgStack(obj.trialInfo.nextErrorInd).Img;
+            img{obj.trialInfo.correctPos}=obj.imgStack.(obj.questions(obj.questionOrder(obj.currQuestion)).CorrectListCategory{1})(obj.trialInfo.nextCorrectInd).Img;
+            img{3-obj.trialInfo.correctPos}=obj.imgStack.(obj.questions(obj.questionOrder(obj.currQuestion)).WrongListCategory{1})(obj.trialInfo.nextErrorInd).Img;
             obj.figureParams.fig1Handle=imagesc(1/5*obj.screenRes(1)-obj.imgWidth*.5,0.5*obj.screenRes(2)-round(size(img{1},1)/2),img{1});
             obj.figureParams.fig2Handle=imagesc(4/5*obj.screenRes(1)-obj.imgWidth*.5,0.5*obj.screenRes(2)-round(size(img{2},1)/2),img{2});
             
@@ -280,7 +319,10 @@ classdef MI_choiceDual < handle
             xCoords=cursorStartPosition(1)+cursorCoords(:,1);
             yCoords=cursorStartPosition(2)+cursorCoords(:,2);
             obj.figureParams.cursorHandle=patch(xCoords,yCoords,'red');
+            obj.figureParams.h = get(gca,'Children');
+            set(gca,'Children',[obj.figureParams.h(1) obj.figureParams.h(2) obj.figureParams.h(5) obj.figureParams.h(3) obj.figureParams.h(4)]);
             set(obj.figureParams.cursorHandle,'FaceAlpha',0.5);
+            drawnow;            
             
             % Start progressive selection cue
             obj.timeTriggeredEvents(5).nextTrigger=obj.currTime;
@@ -296,7 +338,7 @@ classdef MI_choiceDual < handle
             
             % Set cursor pos
             cueDir=((obj.trialInfo.correctPos)-1.5)*2;
-            relativeTimeElapsed=((obj.currTime-obj.timeTriggeredEvents(3).triggersLog(end))/obj.timingParams.imgLength);
+            relativeTimeElapsed=((max(0,obj.currTime-obj.timeTriggeredEvents(3).triggersLog(end)-obj.timingParams.waitTime))/(obj.timingParams.imgLength-obj.timingParams.waitTime));
             xStart=0.5*obj.screenRes(1);
             if cueDir<0
                 xEnd=1/5*obj.screenRes(1);
@@ -370,11 +412,15 @@ classdef MI_choiceDual < handle
 %             end
             % Relevant images are already prepared in a matlab variable
             obj.imgWidth=1/4*obj.screenRes(1);
-            load([obj.structsFolder,'\animali_struct.mat']);
-            obj.imgStack=animali;
-            for currImg=1:length(obj.imgStack)
-                obj.imgStack(currImg).Img=imread([obj.imgFolder,'\',obj.imgStack(currImg).Category,'\',obj.imgStack(currImg).FileName]);
-                obj.imgStack(currImg).Img=imresize(obj.imgStack(currImg).Img,obj.imgWidth/size(obj.imgStack(currImg).Img,2));
+            D=dir(obj.structsFolder);
+            for currStruct=3:length(D)
+                fieldName=D(currStruct).name(1:end-11);
+                load([obj.structsFolder,'/',D(currStruct).name]);
+                eval(['currCategory=',fieldName,';']);
+                for currImg=1:length(currCategory)
+                    obj.imgStack.(fieldName)(currImg).Img=imread([obj.imgFolder,'\',currCategory(currImg).Category,'\',currCategory(currImg).FileName]);
+                    obj.imgStack.(fieldName)(currImg).Img=imresize(obj.imgStack.(fieldName)(currImg).Img,obj.imgWidth/size(obj.imgStack.(fieldName)(currImg).Img,2));
+                end
             end
         end
         
@@ -444,7 +490,7 @@ classdef MI_choiceDual < handle
         
         function startRecording(obj)
             % Create port object
-            obj.openCOMport=serial('COM11','BaudRate',115200,'Timeout',.1,'Terminator','','InputBufferSize',obj.openParams.inputBufferSize);
+            obj.openCOMport=serial('COM10','BaudRate',115200,'Timeout',.1,'Terminator','','InputBufferSize',obj.openParams.inputBufferSize);
             
             % Open serial communication (assuming relevant port is correct), reset
             % board and try to determine whether Daisy module is in use
@@ -517,6 +563,7 @@ classdef MI_choiceDual < handle
             
             % Add event listener to triggered buffer event.
             set_param(obj.modelName,'StartFcn',sprintf('simulinkModelStartFcn(''%s'',''%s'')',obj.modelName,obj.instanceName))
+            set_param(obj.modelName,'StopFcn',sprintf('%s.simulinkModelStopFcn(''%s'',''%s'')',mfilename,obj.instanceName,obj.fileName))
             set_param(obj.modelName,'StopTime','inf');
             set_param(obj.modelName,'FixedStep',['1/',num2str(obj.fs)]);
             set_param(obj.modelName,'SimulationCommand','Start');
@@ -652,11 +699,21 @@ classdef MI_choiceDual < handle
                 obj.closeExp;
             end
             if strcmp(eventdata.Key,'p')
-                keyboard;
+                if strcmp(obj.EEGsystem,'gTec')
+                    if obj.isPausing
+                        obj.isPausing=0;
+                        set_param(obj.modelName,'SimulationCommand','Continue');
+                    else
+                        obj.isPausing=1;
+                        set_param(obj.modelName,'SimulationCommand','Pause');
+                    end
+                else
+                    keyboard;
+                end
             end
         end
         
-        function closeExp(obj)           
+        function closeExp(obj,~,~)           
             % Prevent further events from triggering
             nextTriggerTime=[Inf,Inf,Inf,Inf,Inf];
             for currEvent=1:length(nextTriggerTime)
@@ -667,20 +724,24 @@ classdef MI_choiceDual < handle
             delete(gcf);
             
             % Stop vibration and close serial port communication
-            if obj.isSerialPortOpen
-                fprintf(obj.motorSerialPort,'e8\n');
-                pause(0.003)
-                fprintf(obj.motorSerialPort,'p\n');
-                pause(0.003)
-                fprintf(obj.motorSerialPort,'r0\n');
-                pause(0.003)
-                fprintf(obj.motorSerialPort,'e4\n');
-                pause(0.003)
-                fprintf(obj.motorSerialPort,'p\n');
-                pause(0.003)
-                fprintf(obj.motorSerialPort,'r0\n');
-                fclose(obj.motorSerialPort);
-                delete(obj.motorSerialPort);
+            try
+                if isvalid(obj.isSerialPortOpen)
+                    fprintf(obj.motorSerialPort,'e8\n');
+                    pause(0.003)
+                    fprintf(obj.motorSerialPort,'p\n');
+                    pause(0.003)
+                    fprintf(obj.motorSerialPort,'r0\n');
+                    pause(0.003)
+                    fprintf(obj.motorSerialPort,'e4\n');
+                    pause(0.003)
+                    fprintf(obj.motorSerialPort,'p\n');
+                    pause(0.003)
+                    fprintf(obj.motorSerialPort,'r0\n');
+                    fclose(obj.motorSerialPort);
+                    delete(obj.motorSerialPort);
+                end
+            catch
+                warning('Problem with closing vibration serial port. Close it manually before starting new experiment.');
             end
             
             % Stop data acquisition
@@ -688,19 +749,16 @@ classdef MI_choiceDual < handle
                 stop(obj.shortTimer);
                 fclose(obj.openCOMport);
                 delete(obj.openCOMport);
+                                            
+                % Save data and declare exp closed (this is rather ugly. Is
+                % there a better way of doing it?)
+                eval(sprintf('%s=obj',obj.instanceName));
+                save(obj.fileName,obj.instanceName);
             else
-                set_param(obj.modelName,'SimulationCommand','Stop');
-                set_param(obj.modelName,'StartFcn','')
-                obj.outputLog.rawData=evalin('base','rawData');
-                obj.outputLog.timeLog=obj.outputLog.rawData.Time;
-                obj.outputLog.rawData=obj.outputLog.rawData.Data;
                 obj.listener=[];
+                set_param(obj.modelName,'SimulationCommand','Stop');
+                set_param(obj.modelName,'StartFcn','');
             end
-            
-            % Save data and declare exp closed (this is rather ugly. Is
-            % there a better way of doing it?)
-            eval(sprintf('%s=obj',obj.instanceName));
-            save(obj.fileName,obj.instanceName);
             obj.isExpClosed=1;
         end
         
@@ -709,6 +767,171 @@ classdef MI_choiceDual < handle
             % closed logged data is not lost
             obj.closeExp;
         end
+        
+        %% Analysis methods
+        function offlineErrP(obj)
+            % Apply spatial filters
+            [B,A]=cheby1(2,6,[.2,10]/(obj.fs/2));
+            lapData=obj.applyLapFilter(obj.outputLog.rawData);
+            freqData=filter(B,A,lapData);
+            
+            % Normalize data
+            normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
+            normData=normalize(freqData);
+            
+            % Recover lbls and signal windows
+            lbls=cell2mat({obj.outputLog.trialLog(1:min(obj.maxNtrials,length(obj.outputLog.trialLog)-1)).isFeedbackCorrect})';
+            relWins=zeros(length(lbls),obj.fs*(obj.timingParams.feedbackLength),size(obj.outputLog.rawData,2));
+            for currWin=1:size(relWins,1)
+                relWins(currWin,:,:)=normData(round((obj.timeTriggeredEvents(4).triggersLog(currWin))*obj.fs+1:(obj.timeTriggeredEvents(4).triggersLog(currWin)+obj.timingParams.feedbackLength)*obj.fs),:);
+            end
+            
+            % Recover features and perform classification
+            [freqFeats,timeFeats]=MI_choiceDual.preprocessData(relWins);
+            allFeats=[reshape(freqFeats,size(freqFeats,1),[],1),reshape(timeFeats,size(timeFeats,1),[],1)];
+            
+            % Compute results and log method employed
+            [~,~,obj.lastErrP_BACC]=testClassifier2(lbls,allFeats,'blocktype','subsequent','nblocks',10,'threshold',.3,'selectionType','zScore','classifiertype','svm');
+            tempStack=dbstack;
+            obj.lastErrP_method=tempStack.name;
+        end
+        
+        function offlineKarcherErrP(obj)
+            % Apply spatial filters
+            [B,A]=cheby1(2,6,[.2,10]/(obj.fs/2));
+            lapData=obj.applyLapFilter(obj.outputLog.rawData);
+            freqData=filter(B,A,lapData);
+            
+            % Recover lbls and signal windows
+            lbls=cell2mat({obj.outputLog.trialLog(1:min(obj.maxNtrials,length(obj.outputLog.trialLog)-1)).isFeedbackCorrect})';
+            relWins=zeros(length(lbls),obj.fs*(obj.timingParams.feedbackLength),size(obj.outputLog.rawData,2));
+            for currWin=1:size(relWins,1)
+                relWins(currWin,:,:)=freqData(round((obj.timeTriggeredEvents(4).triggersLog(currWin))*obj.fs+1:(obj.timeTriggeredEvents(4).triggersLog(currWin)+obj.timingParams.feedbackLength)*obj.fs),:);
+            end
+            
+            % Cannot simply use testClassifier, as this algorithm is rather
+            % different from standard ones
+            C.NumTestSets=10;
+            C.groups=ceil(linspace(1/length(lbls),C.NumTestSets,length(lbls)));
+            C.training=@(currGroup)C.groups~=currGroup;
+            C.test=@(currGroup)C.groups==currGroup;
+            classEst=zeros(length(lbls),1);
+            testAcc=@(x,y)(sum((x==1).*(y==1))./sum(x==1)+sum((x==0).*(y==0))./sum(x==0))*.5;
+            for currP=1:C.NumTestSets
+                % Recover training and testing sets
+                trainData=relWins(C.training(currP),:,:);
+                trainLbls=lbls(C.training(currP));
+                testLbls=lbls(C.test(currP));
+                
+                % Compute class means
+                classTags=unique(lbls);
+                classMeans=zeros(length(classTags),size(relWins,2),size(relWins,3));
+                for currClass=1:length(classTags)
+                    classMeans(currClass,:,:)=mean(trainData(trainLbls==classTags(currClass),:,:));
+                end
+                
+                % Construct super-trials
+                superTrainFeats=zeros(size(relWins,1),size(relWins,2),size(relWins,3)*(length(classTags)+1));
+                for currTrial=1:size(relWins,1)
+                    superTrainFeats(currTrial,:,:)=cat(2,reshape(permute(classMeans,[1,3,2]),[],size(relWins,2))',squeeze(relWins(currTrial,:,:)));
+                end
+                
+                % Compute covariance matrices
+                covMats=cell(length(lbls),1);
+                for currTrial=1:length(covMats)
+                    covMats{currTrial}=cov(squeeze(superTrainFeats(currTrial,:,:)));
+                    % Only relevant portion of the covariance matrix is the
+                    % bottom left Nx2N section (N = number of recording
+                    % channels)
+                    covMats{currTrial}=covMats{currTrial}(end-obj.nChannels+1:end,1:2*obj.nChannels);
+                    covMats{currTrial}=reshape(covMats{currTrial},1,size(covMats{currTrial},1),size(covMats{currTrial},2));
+                end
+                
+                % Recover training and testing sets (again)
+                trainData=reshape(cell2mat(covMats(C.training(currP))),length(trainLbls),[]);
+                testData=reshape(cell2mat(covMats(C.test(currP))),length(testLbls),[]);
+                
+                % Perform SVM on resulting matrices
+                clsfr.clsfr=fitcsvm(trainData,trainLbls,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
+                clsfr.predict=@(x)clsfr.clsfr.predict(x);
+                
+                % Perform prediction for training and testing sets
+                classEst(C.test(currP))=clsfr.predict(testData);
+                trainClassEst=clsfr.predict(trainData);
+                fprintf('Fold %d/%d BACC: train: %0.2f; test: %0.2f\n',currP,C.NumTestSets,testAcc(trainLbls,trainClassEst),testAcc(testLbls,classEst(C.test(currP))));
+            end
+            
+            % Estimate CV BACC
+            cvAcc=testAcc(lbls,classEst);
+            fprintf('\nCross-val BACC: test: %0.2f\n',cvAcc);
+        end
+        
+        function offlineMI(obj)
+            % Normalize data
+            normalize=@(x)(x-repmat(mean(x),size(x,1),1))./repmat(1.4826*mad(x,1),size(x,1),1);
+            normData=normalize(obj.outputLog.rawData);
+            
+            % Apply spatial and temporal filters
+            [B,A]=cheby1(4,6,[1,30]/(obj.fs/2));
+            lapData=obj.applyLapFilter(filter(B,A,normData));
+            
+            % Recover lbls and signal windows
+            lbls=cell2mat({obj.outputLog.trialLog(1:min(obj.maxNtrials,length(obj.outputLog.trialLog)-1)).correctPos})';
+            errPlength=obj.timingParams.imgLength-obj.timingParams.waitTime;
+            relWins=zeros(length(lbls),obj.fs*errPlength,size(obj.outputLog.rawData,2));
+            for currWin=1:size(relWins,1)
+                relWins(currWin,:,:)=lapData(round(obj.timeTriggeredEvents(3).triggersLog(currWin))*obj.fs+1:round(obj.timeTriggeredEvents(3).triggersLog(currWin)+errPlength)*obj.fs,:);
+            end
+            
+            % Recover features and perform classification
+            [freqFeats,timeFeats]=MI_choiceDual.preprocessData(relWins);
+            allFeats=[reshape(freqFeats,size(freqFeats,1),[],1),reshape(timeFeats,size(timeFeats,1),[],1)];
+            
+            % Reduce large-scale artefacts
+            for currFeat=1:size(allFeats,2)
+                featsMAD=mad(allFeats(:,currFeat),1);
+                allFeats(:,currFeat)=atan(allFeats(:,currFeat)/(3*featsMAD))*(3*featsMAD);
+            end
+            
+            % Compute results and log method employed
+            [~,~,obj.lastMI_BACC]=testClassifier2(lbls-1,allFeats,'blocktype','subsequent','nblocks',10,'threshold',.35,'selectionType','zScore','classifiertype','logistic');
+            tempStack=dbstack;
+            obj.lastMI_method=tempStack.name;
+        end
+        
+        function offlineKarcherMI(obj)
+            % Apply temporal filters
+            [B,A]=cheby1(4,6,[8,30]/(obj.fs/2));
+            freqData=filter(B,A,obj.outputLog.rawData);
+            
+            % Recover lbls and signal windows
+            lbls=cell2mat({obj.outputLog.trialLog(1:min(obj.maxNtrials,length(obj.outputLog.trialLog)-1)).correctPos})';
+            errPlength=obj.timingParams.imgLength-obj.timingParams.waitTime;
+            relWins=zeros(length(lbls),obj.fs*errPlength,size(obj.outputLog.rawData,2));
+            for currWin=1:size(relWins,1)
+                relWins(currWin,:,:)=freqData(round(obj.timeTriggeredEvents(3).triggersLog(currWin))*obj.fs+1:round(obj.timeTriggeredEvents(3).triggersLog(currWin)+errPlength)*obj.fs,:);
+            end
+            
+            % Compute results and log method employed
+            [~,~,obj.lastMI_BACC]=testClassifier2(lbls-1,relWins,'blocktype','subsequent','nblocks',10,'classifiertype','karcher');
+            tempStack=dbstack;
+            obj.lastMI_method=tempStack.name;
+        end
+        
+        function [outData,fltrWeights]=applyLapFilter(obj,inData)
+            fltrWeights=zeros(size(inData,2));
+            for currEl=1:size(inData,2)
+                neighborsMap=zeros(size(obj.elMap.elMat));
+                neighborsMap(obj.elMap.elMat==currEl)=1;
+                neighborsMap=imdilate(neighborsMap,strel('diamond',1));
+                neighborsMap(obj.elMap.elMat==currEl)=0;
+                validNeighbors=logical(neighborsMap.*obj.elMap.elMat);
+                fltrWeights(currEl,obj.elMap.elMat(validNeighbors))=-1/sum(sum(validNeighbors));
+                fltrWeights(currEl,currEl)=1;
+            end
+            outData=inData*fltrWeights';
+        end
+        
         %% Dependent properties
         function cTime=get.currTime(obj)
             if strcmp(obj.EEGsystem,'openBCI')
@@ -732,6 +955,51 @@ classdef MI_choiceDual < handle
         function res=get.screenRes(~)
             res=get(0,'screensize');
             res=res(3:end);
+        end
+    end
+    methods (Static)
+        function simulinkModelStopFcn(instanceName,fileName)
+            if evalin('base','exist(''isProperExp'',''var'')')
+                commandString=sprintf('%s.outputLog.rawData=rawData;\n%s.outputLog.timeLog=%s.outputLog.rawData.Time;\n%s.outputLog.rawData=%s.outputLog.rawData.Data;\nsave(''%s'',''%s'');\nclear isProperExp',instanceName,instanceName,instanceName,instanceName,instanceName,fileName,instanceName);
+                evalin('base',commandString);
+            end
+        end
+        
+        %% Analysis methods
+        function [freqFeats,timeFeats]=preprocessData(dataWins)
+            % This function takes either one time window as input (during
+            % testing) or a vector of them (during training). Reshape
+            % single window to make it consistent
+            if length(size(dataWins))==2
+                dataWins=reshape(dataWins,1,size(dataWins,1),size(dataWins,2));
+            end
+            [nWins,~,nChs]=size(dataWins);
+            timeFeats=zeros(size(dataWins,1),round(size(dataWins,2)/8),size(dataWins,3));
+            freqFeats=zeros(nWins,129,nChs);
+            % Preprocess each input window
+            for currWin=1:nWins
+                for currCh=1:nChs
+                    relData=squeeze(dataWins(currWin,:,currCh));
+                    % Normalize: set sd to 1
+                    relData=relData/std(relData);
+                    % Remove linear trend
+                    relData=detrend(relData);
+                    timeFeats(currWin,:,currCh)=resample(relData,64,512); % Resample time features at 64Hz (assuming a 512Hz original sampling rate)
+                    % Compute bandpower
+                    currOrder=16;
+                    success=0;
+                    while ~success
+                        try %#ok<TRYNC>
+                            freqFeats(currWin,:,currCh)=pyulear(relData.*blackman(length(relData))',currOrder);
+                        end
+                        success=1;
+                    end
+                end
+            end
+            % Consider only frequencies up to ~60Hz
+            freqFeats(:,31:end,:)=[];
+            % Extract logs
+            freqFeats=log(freqFeats);
         end
     end
 end
